@@ -1,17 +1,13 @@
-// ===================== KEEP ALIVE (RENDER REQUIRED) =====================
+// ================= KEEP ALIVE (RENDER) =================
 const express = require("express");
 const app = express();
+app.get("/", (_, res) => res.send("Security Bot Alive"));
+app.listen(process.env.PORT || 3000);
 
-app.get("/", (req, res) => {
-  res.status(200).send("Bot is alive");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
+// ================= ENV =================
 require("dotenv").config();
 
+// ================= IMPORTS =================
 const {
   Client,
   GatewayIntentBits,
@@ -27,6 +23,9 @@ const {
   InteractionType
 } = require("discord.js");
 
+const mongoose = require("mongoose");
+
+// ================= CLIENT =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -39,74 +38,95 @@ const client = new Client({
 const PREFIX = "!";
 const TIMEOUT_MS = 5 * 60 * 1000;
 
-// ================= STORAGE =================
-const settings = {
-  logChannel: {},
-  antiAbuse: {}
-};
+// ================= DATABASE =================
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => {
+    console.error("❌ MongoDB Error:", err);
+    process.exit(1);
+  });
 
-const warns = {}; // guildId-userId => [{ reason, mod, time }]
+// ================= SCHEMAS =================
+const GuildSchema = new mongoose.Schema({
+  guildId: String,
+  logChannel: String,
+  antiAbuse: { type: Boolean, default: false }
+});
 
+const WarnSchema = new mongoose.Schema({
+  guildId: String,
+  userId: String,
+  reason: String,
+  moderator: String,
+  time: String
+});
+
+const Guild = mongoose.model("Guild", GuildSchema);
+const Warn = mongoose.model("Warn", WarnSchema);
+
+// ================= BAD WORDS =================
 const BAD_WORDS = [
-  "bsdk","madarchod","nga","nigga",
-  "mf","ass","dick","pussy","fuck",
-  "bitch","slut","whore"
+  "bsdk","madarchod","nga","nigga","mf",
+  "ass","dick","pussy","fuck","bitch","slut","whore"
 ];
 
 // ================= READY =================
 client.once("ready", () => {
-  console.log(`🔐 Security online as ${client.user.tag}`);
+  console.log(`🛡 Logged in as ${client.user.tag}`);
   client.user.setActivity("Server Protection", { type: ActivityType.Watching });
 });
 
-// ================= LOG =================
+// ================= LOG FUNCTION =================
 async function sendLog(guild, embed) {
-  const chId = settings.logChannel[guild.id];
-  if (!chId) return;
-  const ch = guild.channels.cache.get(chId);
+  const data = await Guild.findOne({ guildId: guild.id });
+  if (!data?.logChannel) return;
+  const ch = guild.channels.cache.get(data.logChannel);
   if (ch) ch.send({ embeds: [embed] });
 }
 
-// ================= MESSAGE =================
+// ================= MESSAGE HANDLER =================
 client.on("messageCreate", async msg => {
   if (!msg.guild || msg.author.bot) return;
-  const content = msg.content;
-const lower = content.toLowerCase();
+  const content = msg.content.toLowerCase();
 
-  // ---------- ANTI LINK ----------
+  let guildData = await Guild.findOne({ guildId: msg.guild.id });
+  if (!guildData) {
+    guildData = await Guild.create({ guildId: msg.guild.id });
+  }
+
+  // ===== ANTI LINK =====
   if (/(https?:\/\/|discord\.gg)/i.test(content)) {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       await msg.delete().catch(() => {});
       await msg.member.timeout(TIMEOUT_MS, "Anti-Link").catch(() => {});
-      sendLog(msg.guild, new EmbedBuilder()
-        .setColor(0xe74c3c)
-        .setTitle("🚫 Anti-Link")
-        .setDescription(`User: ${msg.author}`)
-        .setTimestamp()
+      sendLog(msg.guild,
+        new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle("🚫 Anti-Link")
+          .setDescription(`User: ${msg.author}`)
+          .setTimestamp()
       );
     }
     return;
   }
 
-  // ---------- ANTI ABUSE ----------
-  if (
-    settings.antiAbuse[msg.guild.id] &&
-    BAD_WORDS.some(w => content.includes(w))
-  ) {
+  // ===== ANTI ABUSE =====
+  if (guildData.antiAbuse && BAD_WORDS.some(w => content.includes(w))) {
     await msg.delete().catch(() => {});
-    await msg.member.timeout(TIMEOUT_MS, "Abusive language").catch(() => {});
-    sendLog(msg.guild, new EmbedBuilder()
-      .setColor(0xe67e22)
-      .setTitle("⚠️ Anti-Abuse")
-      .setDescription(`User: ${msg.author}\nAction: 5 min timeout`)
-      .setTimestamp()
+    await msg.member.timeout(TIMEOUT_MS, "Abusive Language").catch(() => {});
+    sendLog(msg.guild,
+      new EmbedBuilder()
+        .setColor(0xe67e22)
+        .setTitle("⚠️ Anti-Abuse")
+        .setDescription(`User: ${msg.author}\nAction: 5 min timeout`)
+        .setTimestamp()
     );
     return;
   }
 
-  // ---------- COMMANDS ----------
+  // ===== COMMANDS =====
   if (!content.startsWith(PREFIX)) return;
-  const args = msg.content.slice(1).trim().split(/ +/);
+  const args = msg.content.slice(1).split(/ +/);
   const cmd = args.shift()?.toLowerCase();
 
   // ===== HELP =====
@@ -134,55 +154,54 @@ const lower = content.toLowerCase();
       return msg.reply("❌ Admin only");
     const ch = msg.mentions.channels.first();
     if (!ch) return msg.reply("Mention a channel");
-    settings.logChannel[msg.guild.id] = ch.id;
+    guildData.logChannel = ch.id;
+    await guildData.save();
     return msg.reply("✅ Logs channel set");
   }
 
-  // ===== ANTIABUSE TOGGLE =====
+  // ===== ANTIABUSE =====
   if (cmd === "antiabuse") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return msg.reply("❌ Admin only");
-    const opt = args[0];
-    if (!["on","off"].includes(opt)) return msg.reply("Use on/off");
-    settings.antiAbuse[msg.guild.id] = opt === "on";
-    return msg.reply(`✅ Anti-Abuse ${opt.toUpperCase()}`);
+    if (!["on","off"].includes(args[0])) return msg.reply("Use on/off");
+    guildData.antiAbuse = args[0] === "on";
+    await guildData.save();
+    return msg.reply(`✅ Anti-Abuse ${args[0].toUpperCase()}`);
   }
 
-  // ===== WARN SYSTEM =====
+  // ===== WARN =====
   if (cmd === "warn") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
       return msg.reply("❌ No permission");
-
     const user = msg.mentions.users.first();
     const reason = args.slice(1).join(" ") || "No reason";
     if (!user) return msg.reply("Mention a user");
 
-    const key = `${msg.guild.id}-${user.id}`;
-    warns[key] ??= [];
-    warns[key].push({
+    await Warn.create({
+      guildId: msg.guild.id,
+      userId: user.id,
       reason,
-      mod: msg.author.tag,
+      moderator: msg.author.tag,
       time: new Date().toLocaleString()
     });
 
-    sendLog(msg.guild, new EmbedBuilder()
-      .setColor(0xf1c40f)
-      .setTitle("⚠️ User Warned")
-      .setDescription(
-        `User: ${user}\nModerator: ${msg.author}\nReason: ${reason}`
-      )
-      .setTimestamp()
+    sendLog(msg.guild,
+      new EmbedBuilder()
+        .setColor(0xf1c40f)
+        .setTitle("⚠️ User Warned")
+        .setDescription(`User: ${user}\nReason: ${reason}`)
+        .setTimestamp()
     );
 
     return msg.reply(`⚠️ Warned ${user}`);
   }
 
+  // ===== WARNS =====
   if (cmd === "warns") {
     const user = msg.mentions.users.first();
     if (!user) return msg.reply("Mention a user");
-    const key = `${msg.guild.id}-${user.id}`;
-    const list = warns[key];
-    if (!list || !list.length) return msg.reply("No warns");
+    const warns = await Warn.find({ guildId: msg.guild.id, userId: user.id });
+    if (!warns.length) return msg.reply("No warns");
 
     return msg.reply({
       embeds: [
@@ -190,18 +209,19 @@ const lower = content.toLowerCase();
           .setColor(0xe67e22)
           .setTitle(`⚠️ Warns for ${user.tag}`)
           .setDescription(
-            list.map((w,i)=>`**${i+1}.** ${w.reason} *(by ${w.mod})*`).join("\n")
+            warns.map((w,i)=>`**${i+1}.** ${w.reason} *(by ${w.moderator})*`).join("\n")
           )
       ]
     });
   }
 
+  // ===== CLEAR WARNS =====
   if (cmd === "clearwarns") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return msg.reply("❌ Admin only");
     const user = msg.mentions.users.first();
     if (!user) return msg.reply("Mention a user");
-    delete warns[`${msg.guild.id}-${user.id}`];
+    await Warn.deleteMany({ guildId: msg.guild.id, userId: user.id });
     return msg.reply("✅ Warns cleared");
   }
 
@@ -210,7 +230,7 @@ const lower = content.toLowerCase();
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("open_report")
-        .setLabel("📝 Submit Report")
+        .setLabel("📝 Submit Anonymous Report")
         .setStyle(ButtonStyle.Danger)
     );
 
@@ -219,10 +239,7 @@ const lower = content.toLowerCase();
         new EmbedBuilder()
           .setColor(0xff5555)
           .setTitle("📢 Anonymous Report System")
-          .setDescription(
-            "Click the button below to submit an **anonymous report**.\n" +
-            "Reports go **directly to staff logs**."
-          )
+          .setDescription("Click below to submit an anonymous report.")
       ],
       components: [row]
     });
@@ -234,48 +251,38 @@ client.on("interactionCreate", async i => {
   if (i.isButton() && i.customId === "open_report") {
     const modal = new ModalBuilder()
       .setCustomId("report_modal")
-      .setTitle("📝 Anonymous Report");
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("target")
-          .setLabel("Who are you reporting?")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("reason")
-          .setLabel("Reason")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("proof")
-          .setLabel("Proof / Context (optional)")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-      )
-    );
-
+      .setTitle("📝 Anonymous Report")
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("target")
+            .setLabel("Who are you reporting?")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel("Reason")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+        )
+      );
     return i.showModal(modal);
   }
 
   if (i.type === InteractionType.ModalSubmit && i.customId === "report_modal") {
-    const embed = new EmbedBuilder()
-      .setColor(0xff0000)
-      .setTitle("📩 New Anonymous Report")
-      .addFields(
-        { name: "Target", value: i.fields.getTextInputValue("target") },
-        { name: "Reason", value: i.fields.getTextInputValue("reason") },
-        { name: "Proof", value: i.fields.getTextInputValue("proof") || "None" }
-      )
-      .setTimestamp();
-
-    sendLog(i.guild, embed);
-    return i.reply({ content: "✅ Report submitted anonymously.", ephemeral: true });
+    sendLog(i.guild,
+      new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle("📩 Anonymous Report")
+        .addFields(
+          { name: "Target", value: i.fields.getTextInputValue("target") },
+          { name: "Reason", value: i.fields.getTextInputValue("reason") }
+        )
+        .setTimestamp()
+    );
+    return i.reply({ content: "✅ Report submitted.", ephemeral: true });
   }
 });
 
