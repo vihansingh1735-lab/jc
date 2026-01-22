@@ -249,7 +249,9 @@ client.on("messageCreate", async msg => {
     });
   }
 });
-
+if (cmd === "ping") {
+  return msg.reply(`🏓 Pong! Latency: ${client.ws.ping}ms`);
+}
 // ================= REPORT MODAL =================
 client.on("interactionCreate", async i => {
   if (i.isButton() && i.customId === "open_report") {
