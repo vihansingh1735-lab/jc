@@ -1,7 +1,7 @@
-// ===================== KEEP ALIVE =====================
+// ===================== KEEP ALIVE (RENDER) =====================
 const express = require("express");
 const app = express();
-app.get("/", (_, res) => res.send("Bot is alive"));
+app.get("/", (_, res) => res.send("Bot alive"));
 app.listen(process.env.PORT || 3000);
 
 // ===================== IMPORTS =====================
@@ -11,7 +11,8 @@ const {
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
-  ActivityType
+  ActivityType,
+  AuditLogEvent
 } = require("discord.js");
 
 // ===================== CONFIG =====================
@@ -20,6 +21,13 @@ const PREFIX = "!";
 
 // 5 minutes timeout
 const TIMEOUT_MS = 5 * 60 * 1000;
+
+// ===================== BAD WORDS =====================
+const BAD_WORDS = [
+  "bsdk", "madarchod", "nga", "nigga",
+  "mf", "ass", "dick", "pussy",
+  "fuck", "bitch", "slut", "whore"
+];
 
 // ===================== CLIENT =====================
 const client = new Client({
@@ -31,20 +39,13 @@ const client = new Client({
   ]
 });
 
-// ===================== STORAGE (MEMORY) =====================
+// ===================== STORAGE (IN-MEMORY) =====================
 const settings = {
-  logChannel: {},        // guildId => channelId
-  antiAbuse: {},         // guildId => true/false
+  logChannel: {},     // guildId => channelId
+  antiAbuse: {}       // guildId => boolean
 };
 
-const nukeTracker = {};  // guildId-userId => count
-
-// ===================== BAD WORDS =====================
-const BAD_WORDS = [
-  "bsdk", "madarchod", "nga", "nigga",
-  "mf", "ass", "dick", "pussy", "fuck",
-  "bitch", "whore", "slut"
-];
+const nukeTracker = {}; // guildId-userId => count
 
 // ===================== READY =====================
 client.once("ready", () => {
@@ -56,10 +57,10 @@ client.once("ready", () => {
 
 // ===================== LOG FUNCTION =====================
 async function sendLog(guild, embed) {
-  const chId = settings.logChannel[guild.id];
-  if (!chId) return;
-  const ch = guild.channels.cache.get(chId);
-  if (ch) ch.send({ embeds: [embed] });
+  const channelId = settings.logChannel[guild.id];
+  if (!channelId) return;
+  const channel = guild.channels.cache.get(channelId);
+  if (channel) channel.send({ embeds: [embed] });
 }
 
 // ===================== HELP EMBED =====================
@@ -70,12 +71,12 @@ function helpEmbed(guild) {
       name: `${guild.name} • Security Panel`,
       iconURL: guild.iconURL({ dynamic: true })
     })
-    .setTitle("🛡️ Protection Commands")
+    .setTitle("🛡️ Security Commands")
     .addFields(
       {
         name: "📌 General",
         value:
-          "`!help` — Show commands\n" +
+          "`!help` — Show help\n" +
           "`!ping` — Bot latency\n" +
           "`!status` — Protection status"
       },
@@ -88,9 +89,10 @@ function helpEmbed(guild) {
       {
         name: "🚨 Auto Protection",
         value:
-          "• Anti-abuse (5 min timeout)\n" +
+          "• Anti-abuse (timeout)\n" +
           "• Anti-link\n" +
-          "• Anti-nuke"
+          "• Anti-nuke\n" +
+          "• **Instant bot-adder ban**"
       }
     )
     .setFooter({ text: "Security system active" });
@@ -106,7 +108,7 @@ client.on("messageCreate", async message => {
   if (/(https?:\/\/|discord\.gg)/i.test(content)) {
     if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       await message.delete().catch(() => {});
-      await message.member.timeout(TIMEOUT_MS, "Anti-Link").catch(() => {});
+      await message.member.timeout(TIMEOUT_MS, "Anti-link").catch(() => {});
 
       sendLog(message.guild,
         new EmbedBuilder()
@@ -137,23 +139,22 @@ client.on("messageCreate", async message => {
     return;
   }
 
-  // ===================== COMMANDS =====================
+  // ===================== PREFIX COMMANDS =====================
   if (!content.startsWith(PREFIX)) return;
-
   const args = content.slice(PREFIX.length).trim().split(/ +/);
   const cmd = args.shift();
 
-  // ===================== HELP =====================
+  // HELP
   if (cmd === "help") {
     return message.reply({ embeds: [helpEmbed(message.guild)] });
   }
 
-  // ===================== PING =====================
+  // PING
   if (cmd === "ping") {
     return message.reply(`🏓 Pong: ${client.ws.ping}ms`);
   }
 
-  // ===================== STATUS =====================
+  // STATUS
   if (cmd === "status") {
     return message.reply({
       embeds: [
@@ -167,14 +168,15 @@ client.on("messageCreate", async message => {
               inline: true
             },
             { name: "Anti-Link", value: "ON ✅", inline: true },
-            { name: "Anti-Nuke", value: "ON ✅", inline: true }
+            { name: "Anti-Nuke", value: "ON ✅", inline: true },
+            { name: "Anti-Bot Add", value: "ON ✅", inline: true }
           )
           .setTimestamp()
       ]
     });
   }
 
-  // ===================== SET LOG =====================
+  // SET LOG
   if (cmd === "setlog") {
     if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return message.reply("❌ Admin only.");
@@ -186,7 +188,7 @@ client.on("messageCreate", async message => {
     return message.reply(`✅ Logs channel set to ${ch}`);
   }
 
-  // ===================== ANTIABUSE TOGGLE =====================
+  // ANTIABUSE TOGGLE
   if (cmd === "antiabuse") {
     if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return message.reply("❌ Admin only.");
@@ -198,6 +200,47 @@ client.on("messageCreate", async message => {
     settings.antiAbuse[message.guild.id] = opt === "on";
     return message.reply(`✅ Anti-Abuse **${opt.toUpperCase()}**`);
   }
+});
+
+// ===================== INSTANT BAN: BOT ADD =====================
+client.on("guildMemberAdd", async member => {
+  if (!member.user.bot) return;
+
+  const logs = await member.guild.fetchAuditLogs({
+    type: AuditLogEvent.BotAdd,
+    limit: 1
+  }).catch(() => null);
+
+  if (!logs) return;
+  const entry = logs.entries.first();
+  if (!entry) return;
+
+  const executor = entry.executor;
+  if (!executor) return;
+
+  const adder = await member.guild.members.fetch(executor.id).catch(() => null);
+  if (!adder) return;
+
+  // Allow owner & admins
+  if (
+    adder.id === member.guild.ownerId ||
+    adder.permissions.has(PermissionsBitField.Flags.Administrator)
+  ) return;
+
+  // BAN THE ADDER
+  await adder.ban({ reason: "Unauthorized bot addition" }).catch(() => {});
+
+  sendLog(member.guild,
+    new EmbedBuilder()
+      .setColor(0xff0000)
+      .setTitle("🤖 Unauthorized Bot Added")
+      .setDescription(
+        `Bot: **${member.user.tag}**\n` +
+        `Added by: **${adder.user.tag}**\n` +
+        `Action: **BANNED**`
+      )
+      .setTimestamp()
+  );
 });
 
 // ===================== ANTI-NUKE =====================
