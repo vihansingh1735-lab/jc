@@ -74,6 +74,10 @@ const BAD_WORDS = [
 client.once("ready", () => {
   console.log(`🛡 Logged in as ${client.user.tag}`);
   client.user.setActivity("Server Protection", { type: ActivityType.Watching });
+  // 🔁 KEEP NODE EVENT LOOP ACTIVE (CRITICAL FOR RENDER)
+setInterval(() => {
+  console.log("🫀 Heartbeat:", new Date().toISOString());
+}, 60 * 1000);
 });
 
 // ================= LOG FUNCTION =================
