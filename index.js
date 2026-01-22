@@ -70,7 +70,8 @@ async function sendLog(guild, embed) {
 // ================= MESSAGE =================
 client.on("messageCreate", async msg => {
   if (!msg.guild || msg.author.bot) return;
-  const content = msg.content.toLowerCase();
+  const content = msg.content;
+const lower = content.toLowerCase();
 
   // ---------- ANTI LINK ----------
   if (/(https?:\/\/|discord\.gg)/i.test(content)) {
