@@ -1,7 +1,7 @@
 // ================= KEEP ALIVE (RENDER) =================
 const express = require("express");
 const app = express();
-app.get("/", (_, res) => res.send("INT Security Alive"));
+app.get("/", (_, res) => res.send("Security Bot Alive"));
 app.listen(process.env.PORT || 3000);
 
 // ================= ENV =================
@@ -23,8 +23,13 @@ const {
   InteractionType,
   AuditLogEvent
 } = require("discord.js");
-
 const mongoose = require("mongoose");
+
+// ================= CONFIG =================
+const TOKEN = process.env.TOKEN;
+const PREFIX = "!";
+const TIMEOUT_MS = 5 * 60 * 1000;
+const NUKELIMIT = 3;
 
 // ================= CLIENT =================
 const client = new Client({
@@ -35,9 +40,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ]
 });
-
-const PREFIX = ".";
-const TIMEOUT_MS = 5 * 60 * 1000;
 
 // ================= DATABASE =================
 mongoose.connect(process.env.MONGO_URI)
@@ -62,8 +64,26 @@ const WarnSchema = new mongoose.Schema({
   time: String
 });
 
+const NukeSchema = new mongoose.Schema({
+  guildId: String,
+  userId: String,
+  count: Number
+});
+
+const ChannelBackupSchema = new mongoose.Schema({
+  guildId: String,
+  channelId: String,
+  name: String,
+  type: Number,
+  parent: String,
+  position: Number,
+  permissionOverwrites: Array
+});
+
 const Guild = mongoose.model("Guild", GuildSchema);
 const Warn = mongoose.model("Warn", WarnSchema);
+const Nuke = mongoose.model("Nuke", NukeSchema);
+const ChannelBackup = mongoose.model("ChannelBackup", ChannelBackupSchema);
 
 // ================= BAD WORDS =================
 const BAD_WORDS = [
@@ -74,9 +94,7 @@ const BAD_WORDS = [
 // ================= READY =================
 client.once("ready", () => {
   console.log(`🛡 Logged in as ${client.user.tag}`);
-  client.user.setActivity("INT Server Protection", {
-    type: ActivityType.Watching
-  });
+  client.user.setActivity("Server Protection", { type: ActivityType.Watching });
 });
 
 // ================= LOG FUNCTION =================
@@ -90,21 +108,20 @@ async function sendLog(guild, embed) {
 // ================= MESSAGE HANDLER =================
 client.on("messageCreate", async msg => {
   if (!msg.guild || msg.author.bot) return;
+  const content = msg.content.toLowerCase();
 
   let guildData = await Guild.findOne({ guildId: msg.guild.id });
   if (!guildData) guildData = await Guild.create({ guildId: msg.guild.id });
 
-  const content = msg.content.toLowerCase();
-
   // ===== ANTI ABUSE =====
   if (guildData.antiAbuse && BAD_WORDS.some(w => content.includes(w))) {
     await msg.delete().catch(() => {});
-    await msg.member.timeout(TIMEOUT_MS, "Abusive Language").catch(() => {});
+    await msg.member.timeout(TIMEOUT_MS, "Abusive language").catch(() => {});
     sendLog(msg.guild,
       new EmbedBuilder()
         .setColor(0xe67e22)
         .setTitle("⚠️ Anti-Abuse Triggered")
-        .setDescription(`User: ${msg.author}\nTimeout: 5 mins`)
+        .setDescription(`User: ${msg.author}`)
         .setTimestamp()
     );
     return;
@@ -121,12 +138,14 @@ client.on("messageCreate", async msg => {
       embeds: [
         new EmbedBuilder()
           .setColor(0x2ecc71)
-          .setTitle("🛡 INT Security Commands")
+          .setTitle("🛡 Security Commands")
           .setDescription(
             "**Setup**\n" +
             "`!setlog #channel`\n`!antiabuse on/off`\n\n" +
             "**Moderation**\n" +
             "`!warn @user reason`\n`!warns @user`\n`!clearwarns @user`\n\n" +
+            "**Protection**\n" +
+            "• Anti-Nuke\n• Anti-Bot Add\n• Auto Channel Restore\n\n" +
             "**Reports**\n" +
             "`!reportpanel`"
           )
@@ -142,7 +161,7 @@ client.on("messageCreate", async msg => {
     if (!ch) return msg.reply("Mention a channel");
     guildData.logChannel = ch.id;
     await guildData.save();
-    return msg.reply("✅ Log channel set");
+    return msg.reply("✅ Logs channel set");
   }
 
   // ===== ANTIABUSE =====
@@ -182,6 +201,7 @@ client.on("messageCreate", async msg => {
     return msg.reply(`⚠️ Warned ${user}`);
   }
 
+  // ===== WARNS =====
   if (cmd === "warns") {
     const user = msg.mentions.users.first();
     if (!user) return msg.reply("Mention a user");
@@ -200,6 +220,7 @@ client.on("messageCreate", async msg => {
     });
   }
 
+  // ===== CLEAR WARNS =====
   if (cmd === "clearwarns") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return msg.reply("❌ Admin only");
@@ -280,12 +301,12 @@ client.on("guildMemberAdd", async member => {
   });
 
   const entry = logs.entries.first();
-  if (!entry) return;
+  if (!entry?.executor) return;
 
-  await member.ban({ reason: "Unauthorized bot" }).catch(() => {});
+  await member.ban({ reason: "Unauthorized bot" }).catch(()=>{});
   await member.guild.members.ban(entry.executor.id, {
     reason: "Added unauthorized bot"
-  }).catch(() => {});
+  }).catch(()=>{});
 
   sendLog(member.guild,
     new EmbedBuilder()
@@ -296,28 +317,51 @@ client.on("guildMemberAdd", async member => {
   );
 });
 
-// ================= ANTI NUKE =================
+// ================= ANTI NUKE + AUTO RESTORE =================
 client.on("channelDelete", async channel => {
   const logs = await channel.guild.fetchAuditLogs({
     type: AuditLogEvent.ChannelDelete,
     limit: 1
   });
-
   const entry = logs.entries.first();
-  if (!entry || entry.executor.bot) return;
+  if (!entry?.executor) return;
 
-  await channel.guild.members.ban(entry.executor.id, {
-    reason: "Channel Nuke Attempt"
-  }).catch(() => {});
-
-  sendLog(channel.guild,
-    new EmbedBuilder()
-      .setColor(0xff0000)
-      .setTitle("💥 Anti-Nuke Triggered")
-      .setDescription(`Executor banned: <@${entry.executor.id}>`)
-      .setTimestamp()
+  const key = { guildId: channel.guild.id, userId: entry.executor.id };
+  const data = await Nuke.findOneAndUpdate(
+    key,
+    { $inc: { count: 1 } },
+    { upsert: true, new: true }
   );
+
+  // Restore channel
+  await channel.guild.channels.create({
+    name: channel.name,
+    type: channel.type,
+    parent: channel.parent,
+    position: channel.position,
+    permissionOverwrites: channel.permissionOverwrites.cache.map(p => ({
+      id: p.id,
+      allow: p.allow.bitfield,
+      deny: p.deny.bitfield
+    }))
+  });
+
+  if (data.count >= NUKELIMIT) {
+    await channel.guild.members.ban(entry.executor.id, {
+      reason: "Anti-Nuke Triggered"
+    }).catch(()=>{});
+
+    await Nuke.deleteOne(key);
+
+    sendLog(channel.guild,
+      new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle("🔥 Anti-Nuke Triggered")
+        .setDescription(`Executor banned: <@${entry.executor.id}>`)
+        .setTimestamp()
+    );
+  }
 });
 
 // ================= LOGIN =================
-client.login(process.env.TOKEN);
+client.login(TOKEN);
