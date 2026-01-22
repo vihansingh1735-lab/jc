@@ -1,200 +1,163 @@
-// ================== ENV ==================
 require("dotenv").config();
 
-// ================== IMPORTS ==================
 const {
   Client,
   GatewayIntentBits,
-  EmbedBuilder,
   PermissionsBitField,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ChannelType
+  EmbedBuilder,
+  ActivityType
 } = require("discord.js");
 
-// ================== CONFIG ==================
-const TOKEN = process.env.TOKEN;
-const PREFIX = "!";
-const STAFF_ROLE_NAME = "Tester";
-
-// ================== CLIENT ==================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.MessageContent
   ]
 });
 
-// ================== MEMORY DB ==================
-const testers = [];
-let testerIndex = 0;
+const PREFIX = "!";
+const TIMEOUT_MS = 5 * 60 * 1000;
 
-const tickets = {}; 
-// channelId => { ownerId, testerId, aiLocked }
+const settings = {
+  logChannel: {},
+  antiAbuse: {}
+};
 
-// ================== READY ==================
+const BAD_WORDS = [
+  "bsdk","madarchod","nga","nigga",
+  "mf","ass","dick","pussy","fuck",
+  "bitch","slut","whore"
+];
+
+// ================= READY =================
 client.once("ready", () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
+  console.log(`🔐 Security online as ${client.user.tag}`);
+  client.user.setActivity("Server Protection", { type: ActivityType.Watching });
 });
 
-// ================== APPLY PANEL ==================
-function panelEmbed() {
-  return new EmbedBuilder()
-    .setTitle("🎟 Apply for Testing")
-    .setDescription("Click the button below to apply.")
-    .setColor(0x2b2d31);
+// ================= LOG =================
+async function sendLog(guild, embed) {
+  const chId = settings.logChannel[guild.id];
+  if (!chId) return;
+  const ch = guild.channels.cache.get(chId);
+  if (ch) ch.send({ embeds: [embed] });
 }
 
-function panelRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("apply_ticket")
-      .setLabel("Apply")
-      .setStyle(ButtonStyle.Primary)
-  );
-}
-
-// ================== APPLICATION FORM ==================
-function formEmbed() {
-  return new EmbedBuilder()
-    .setTitle("📄 Application Form")
-    .setDescription(
-      "1. How much XP do you have?\n" +
-      "2. Which country are you from?\n" +
-      "3. Are you good with taser?\n" +
-      "4. Are you good with guns?\n" +
-      "5. Roblox Username?"
-    )
-    .setColor(0x3498db);
-}
-
-// ================== TESTER CONFIRM ==================
-function confirmRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("confirm_test")
-      .setLabel("Confirm Test")
-      .setStyle(ButtonStyle.Success)
-  );
-}
-
-// ================== COMMANDS ==================
+// ================= MESSAGE =================
 client.on("messageCreate", async msg => {
   if (!msg.guild || msg.author.bot) return;
 
-  const args = msg.content.split(/\s+/);
-  const cmd = args.shift()?.toLowerCase();
+  const content = msg.content.toLowerCase();
 
-  // PANEL
-  if (cmd === "!panel") {
-    return msg.channel.send({
-      embeds: [panelEmbed()],
-      components: [panelRow()]
-    });
-  }
+  // -------- Anti Link --------
+  if (/(https?:\/\/|discord\.gg)/i.test(content)) {
+    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      await msg.delete().catch(() => {});
+      await msg.member.timeout(TIMEOUT_MS, "Anti-Link").catch(() => {});
 
-  // TESTER COMMANDS
-  if (cmd === "!tester") {
-    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
-      return msg.reply("❌ Admin only");
-
-    const sub = args[0];
-    const user = msg.mentions.users.first();
-
-    if (sub === "add" && user) {
-      if (!testers.includes(user.id)) testers.push(user.id);
-      return msg.reply("✅ Tester added");
-    }
-
-    if (sub === "remove" && user) {
-      const i = testers.indexOf(user.id);
-      if (i !== -1) testers.splice(i, 1);
-      return msg.reply("✅ Tester removed");
-    }
-
-    if (sub === "list") {
-      return msg.reply(
-        testers.length
-          ? testers.map(id => `<@${id}>`).join("\n")
-          : "No testers"
+      sendLog(msg.guild, new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle("🚫 Anti-Link")
+        .setDescription(`User: ${msg.author}`)
+        .setTimestamp()
       );
     }
+    return;
   }
 
-  // AI TICKET BRAIN
-  if (tickets[msg.channel.id]) {
-    const ticket = tickets[msg.channel.id];
+  // -------- Anti Abuse --------
+  if (
+    settings.antiAbuse[msg.guild.id] &&
+    BAD_WORDS.some(w => content.includes(w))
+  ) {
+    await msg.delete().catch(() => {});
+    await msg.member.timeout(TIMEOUT_MS, "Abusive language").catch(() => {});
 
-    if (ticket.aiLocked) return;
-
-    const content = msg.content.toLowerCase();
-
-    const allowed =
-      content.includes("xp") ||
-      content.includes("country") ||
-      content.includes("taser") ||
-      content.includes("gun") ||
-      content.includes("roblox") ||
-      content.match(/\d/);
-
-    if (!allowed) {
-      return msg.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xe74c3c)
-            .setDescription("🤖 I can’t reply regarding this. Please wait for your tester.")
-        ]
-      });
-    }
-  }
-});
-
-// ================== INTERACTIONS ==================
-client.on("interactionCreate", async i => {
-  if (!i.isButton()) return;
-
-  // APPLY
-  if (i.customId === "apply_ticket") {
-    const channel = await i.guild.channels.create({
-      name: `ticket-${i.user.username}`,
-      type: ChannelType.GuildText,
-      permissionOverwrites: [
-        { id: i.guild.id, deny: ["ViewChannel"] },
-        { id: i.user.id, allow: ["ViewChannel", "SendMessages"] }
-      ]
-    });
-
-    tickets[channel.id] = {
-      ownerId: i.user.id,
-      testerId: null,
-      aiLocked: false
-    };
-
-    await channel.send({ embeds: [formEmbed()] });
-    await i.reply({ content: "🎟 Ticket created", ephemeral: true });
+    sendLog(msg.guild, new EmbedBuilder()
+      .setColor(0xe67e22)
+      .setTitle("⚠️ Anti-Abuse")
+      .setDescription(`User: ${msg.author}\nAction: 5 min timeout`)
+      .setTimestamp()
+    );
+    return;
   }
 
-  // CONFIRM TEST
-  if (i.customId === "confirm_test") {
-    const ticket = tickets[i.channel.id];
-    if (!ticket) return;
+  // -------- Commands --------
+  if (!content.startsWith(PREFIX)) return;
+  const args = content.slice(1).split(/ +/);
+  const cmd = args.shift();
 
-    ticket.aiLocked = true;
-    ticket.testerId = i.user.id;
-
-    await i.channel.send({
+  if (cmd === "help") {
+    return msg.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0x2ecc71)
-          .setDescription(`✅ Tester <@${i.user.id}> assigned. AI locked.`)
+          .setTitle("🛡 Security Commands")
+          .setDescription(
+            "`!setlog #channel`\n" +
+            "`!antiabuse on/off`\n" +
+            "`!status`"
+          )
       ]
     });
+  }
 
-    await i.reply({ content: "Confirmed", ephemeral: true });
+  if (cmd === "setlog") {
+    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return msg.reply("❌ Admin only");
+    const ch = msg.mentions.channels.first();
+    if (!ch) return msg.reply("Mention a channel");
+    settings.logChannel[msg.guild.id] = ch.id;
+    return msg.reply("✅ Logs channel set");
+  }
+
+  if (cmd === "antiabuse") {
+    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return msg.reply("❌ Admin only");
+    const opt = args[0];
+    if (!["on","off"].includes(opt)) return msg.reply("Use on/off");
+    settings.antiAbuse[msg.guild.id] = opt === "on";
+    return msg.reply(`✅ Anti-Abuse ${opt.toUpperCase()}`);
+  }
+
+  if (cmd === "status") {
+    return msg.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x3498db)
+          .setTitle("🛡 Protection Status")
+          .addFields(
+            { name: "Anti-Abuse", value: settings.antiAbuse[msg.guild.id] ? "ON ✅" : "OFF ❌" },
+            { name: "Anti-Link", value: "ON ✅" },
+            { name: "Anti-Bot Add", value: "ON ✅" }
+          )
+      ]
+    });
   }
 });
 
-// ================== LOGIN ==================
-client.login(TOKEN);
+// ================= ANTI BOT ADD =================
+client.on("guildMemberAdd", async member => {
+  if (!member.user.bot) return;
+
+  const logs = await member.guild.fetchAuditLogs({ type: 28, limit: 1 });
+  const entry = logs.entries.first();
+  if (!entry || !entry.executor) return;
+
+  await member.ban({ reason: "Unauthorized bot" }).catch(() => {});
+  await member.guild.members.ban(entry.executor.id, {
+    reason: "Added unauthorized bot"
+  }).catch(() => {});
+
+  sendLog(member.guild, new EmbedBuilder()
+    .setColor(0xff0000)
+    .setTitle("🤖 Anti-Bot Add")
+    .setDescription(`Executor banned: <@${entry.executor.id}>`)
+    .setTimestamp()
+  );
+});
+
+// ================= LOGIN =================
+client.login(process.env.TOKEN);
