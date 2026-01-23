@@ -67,23 +67,18 @@ const WarnSchema = new mongoose.Schema({
 const NukeSchema = new mongoose.Schema({
   guildId: String,
   userId: String,
-  count: Number
+  count: { type: Number, default: 0 }
 });
 
-const ChannelBackupSchema = new mongoose.Schema({
+const WhitelistSchema = new mongoose.Schema({
   guildId: String,
-  channelId: String,
-  name: String,
-  type: Number,
-  parent: String,
-  position: Number,
-  permissionOverwrites: Array
+  userId: String
 });
 
 const Guild = mongoose.model("Guild", GuildSchema);
 const Warn = mongoose.model("Warn", WarnSchema);
 const Nuke = mongoose.model("Nuke", NukeSchema);
-const ChannelBackup = mongoose.model("ChannelBackup", ChannelBackupSchema);
+const Whitelist = mongoose.model("Whitelist", WhitelistSchema);
 
 // ================= BAD WORDS =================
 const BAD_WORDS = [
@@ -97,7 +92,12 @@ client.once("ready", () => {
   client.user.setActivity("Server Protection", { type: ActivityType.Watching });
 });
 
-// ================= LOG FUNCTION =================
+// ================= HELPERS =================
+async function isWhitelisted(guildId, userId) {
+  const data = await Whitelist.findOne({ guildId, userId });
+  return !!data;
+}
+
 async function sendLog(guild, embed) {
   const data = await Guild.findOne({ guildId: guild.id });
   if (!data?.logChannel) return;
@@ -115,12 +115,13 @@ client.on("messageCreate", async msg => {
 
   // ===== ANTI ABUSE =====
   if (guildData.antiAbuse && BAD_WORDS.some(w => content.includes(w))) {
-    await msg.delete().catch(() => {});
-    await msg.member.timeout(TIMEOUT_MS, "Abusive language").catch(() => {});
+    await msg.delete().catch(()=>{});
+    await msg.member.timeout(TIMEOUT_MS, "Abusive language").catch(()=>{});
+
     sendLog(msg.guild,
       new EmbedBuilder()
         .setColor(0xe67e22)
-        .setTitle("⚠️ Anti-Abuse Triggered")
+        .setTitle("⚠️ Anti-Abuse")
         .setDescription(`User: ${msg.author}`)
         .setTimestamp()
     );
@@ -142,12 +143,14 @@ client.on("messageCreate", async msg => {
           .setDescription(
             "**Setup**\n" +
             "`!setlog #channel`\n`!antiabuse on/off`\n\n" +
+            "**Whitelist**\n" +
+            "`!whitelist add @user`\n" +
+            "`!whitelist remove @user`\n" +
+            "`!whitelist list`\n\n" +
             "**Moderation**\n" +
             "`!warn @user reason`\n`!warns @user`\n`!clearwarns @user`\n\n" +
             "**Protection**\n" +
-            "• Anti-Nuke\n• Anti-Bot Add\n• Auto Channel Restore\n\n" +
-            "**Reports**\n" +
-            "`!reportpanel`"
+            "• Anti-Nuke\n• Anti-Bot Add\n• Auto Channel Restore"
           )
       ]
     });
@@ -164,7 +167,7 @@ client.on("messageCreate", async msg => {
     return msg.reply("✅ Logs channel set");
   }
 
-  // ===== ANTIABUSE =====
+  // ===== ANTIABUSE TOGGLE =====
   if (cmd === "antiabuse") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return msg.reply("❌ Admin only");
@@ -174,13 +177,56 @@ client.on("messageCreate", async msg => {
     return msg.reply(`✅ Anti-Abuse ${args[0].toUpperCase()}`);
   }
 
-  // ===== WARN =====
+  // ===== WHITELIST =====
+  if (cmd === "whitelist") {
+    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return msg.reply("❌ Admin only");
+
+    const action = args[0];
+    const user = msg.mentions.users.first();
+
+    if (action === "add") {
+      if (!user) return msg.reply("Usage: `!whitelist add @user`");
+      if (await isWhitelisted(msg.guild.id, user.id))
+        return msg.reply("⚠️ Already whitelisted.");
+
+      await Whitelist.create({ guildId: msg.guild.id, userId: user.id });
+      return msg.reply(`✅ ${user.tag} added to whitelist`);
+    }
+
+    if (action === "remove") {
+      if (!user) return msg.reply("Usage: `!whitelist remove @user`");
+      await Whitelist.deleteOne({ guildId: msg.guild.id, userId: user.id });
+      return msg.reply(`❌ ${user.tag} removed from whitelist`);
+    }
+
+    if (action === "list") {
+      const list = await Whitelist.find({ guildId: msg.guild.id });
+      if (!list.length) return msg.reply("📭 Whitelist empty");
+
+      const users = await Promise.all(
+        list.map(w => msg.client.users.fetch(w.userId).catch(()=>null))
+      );
+
+      return msg.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x2ecc71)
+            .setTitle("✅ Whitelisted Users")
+            .setDescription(users.filter(Boolean).map(u=>`• ${u.tag}`).join("\n"))
+        ]
+      });
+    }
+  }
+
+  // ===== WARN SYSTEM =====
   if (cmd === "warn") {
     if (!msg.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
       return msg.reply("❌ No permission");
+
     const user = msg.mentions.users.first();
-    const reason = args.slice(1).join(" ") || "No reason";
     if (!user) return msg.reply("Mention a user");
+    const reason = args.slice(1).join(" ") || "No reason";
 
     await Warn.create({
       guildId: msg.guild.id,
@@ -200,95 +246,6 @@ client.on("messageCreate", async msg => {
 
     return msg.reply(`⚠️ Warned ${user}`);
   }
-
-  // ===== WARNS =====
-  if (cmd === "warns") {
-    const user = msg.mentions.users.first();
-    if (!user) return msg.reply("Mention a user");
-    const warns = await Warn.find({ guildId: msg.guild.id, userId: user.id });
-    if (!warns.length) return msg.reply("No warns");
-
-    return msg.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xe67e22)
-          .setTitle(`⚠️ Warns for ${user.tag}`)
-          .setDescription(
-            warns.map((w,i)=>`**${i+1}.** ${w.reason} *(by ${w.moderator})*`).join("\n")
-          )
-      ]
-    });
-  }
-
-  // ===== CLEAR WARNS =====
-  if (cmd === "clearwarns") {
-    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator))
-      return msg.reply("❌ Admin only");
-    const user = msg.mentions.users.first();
-    if (!user) return msg.reply("Mention a user");
-    await Warn.deleteMany({ guildId: msg.guild.id, userId: user.id });
-    return msg.reply("✅ Warns cleared");
-  }
-
-  // ===== REPORT PANEL =====
-  if (cmd === "reportpanel") {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("open_report")
-        .setLabel("📝 Submit Anonymous Report")
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    return msg.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xff5555)
-          .setTitle("📢 Anonymous Report System")
-          .setDescription("Click below to submit an anonymous report.")
-      ],
-      components: [row]
-    });
-  }
-});
-
-// ================= REPORT MODAL =================
-client.on("interactionCreate", async i => {
-  if (i.isButton() && i.customId === "open_report") {
-    const modal = new ModalBuilder()
-      .setCustomId("report_modal")
-      .setTitle("📝 Anonymous Report")
-      .addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("target")
-            .setLabel("Who are you reporting?")
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("reason")
-            .setLabel("Reason")
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true)
-        )
-      );
-    return i.showModal(modal);
-  }
-
-  if (i.type === InteractionType.ModalSubmit && i.customId === "report_modal") {
-    sendLog(i.guild,
-      new EmbedBuilder()
-        .setColor(0xff0000)
-        .setTitle("📩 Anonymous Report")
-        .addFields(
-          { name: "Target", value: i.fields.getTextInputValue("target") },
-          { name: "Reason", value: i.fields.getTextInputValue("reason") }
-        )
-        .setTimestamp()
-    );
-    return i.reply({ content: "✅ Report submitted.", ephemeral: true });
-  }
 });
 
 // ================= ANTI BOT ADD =================
@@ -299,13 +256,14 @@ client.on("guildMemberAdd", async member => {
     type: AuditLogEvent.BotAdd,
     limit: 1
   });
-
   const entry = logs.entries.first();
   if (!entry?.executor) return;
 
+  if (await isWhitelisted(member.guild.id, entry.executor.id)) return;
+
   await member.ban({ reason: "Unauthorized bot" }).catch(()=>{});
   await member.guild.members.ban(entry.executor.id, {
-    reason: "Added unauthorized bot"
+    reason: "Unauthorized bot add"
   }).catch(()=>{});
 
   sendLog(member.guild,
@@ -326,24 +284,19 @@ client.on("channelDelete", async channel => {
   const entry = logs.entries.first();
   if (!entry?.executor) return;
 
-  const key = { guildId: channel.guild.id, userId: entry.executor.id };
+  if (await isWhitelisted(channel.guild.id, entry.executor.id)) return;
+
   const data = await Nuke.findOneAndUpdate(
-    key,
+    { guildId: channel.guild.id, userId: entry.executor.id },
     { $inc: { count: 1 } },
     { upsert: true, new: true }
   );
 
-  // Restore channel
   await channel.guild.channels.create({
     name: channel.name,
     type: channel.type,
     parent: channel.parent,
-    position: channel.position,
-    permissionOverwrites: channel.permissionOverwrites.cache.map(p => ({
-      id: p.id,
-      allow: p.allow.bitfield,
-      deny: p.deny.bitfield
-    }))
+    position: channel.position
   });
 
   if (data.count >= NUKELIMIT) {
@@ -351,7 +304,7 @@ client.on("channelDelete", async channel => {
       reason: "Anti-Nuke Triggered"
     }).catch(()=>{});
 
-    await Nuke.deleteOne(key);
+    await Nuke.deleteOne({ guildId: channel.guild.id, userId: entry.executor.id });
 
     sendLog(channel.guild,
       new EmbedBuilder()
